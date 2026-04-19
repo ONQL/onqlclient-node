@@ -194,32 +194,11 @@ class ONQLClient {
   // ------------------------------------------------------------------
   // Direct ORM-style API (insert / update / delete / onql / build)
   //
-  // `path` is a dotted string identifying a record or a table, e.g.
-  //   "mydb.users"         -> whole `users` table in database `mydb`
-  //   "mydb.users.u1"      -> record with id `u1` in `mydb.users`
+  // `query` arguments are ONQL expression *strings*, e.g.
+  //   "mydb.users[id=\"u1\"].id"
+  //   "mydb.orders[status=\"pending\"]"
+  // Use `client.build(template, ...values)` to substitute $1, $2 ...
   // ------------------------------------------------------------------
-
-  /**
-   * Parse a "db.table" or "db.table.id" path into parts.
-   * @param {string} path
-   * @param {boolean} requireId  If true, path must contain an id segment.
-   * @returns {{db: string, table: string, id: string}}
-   */
-  _parsePath(path, requireId = false) {
-    if (typeof path !== "string" || path.length === 0) {
-      throw new Error('Path must be a non-empty string like "db.table" or "db.table.id"');
-    }
-    const parts = path.split(".");
-    if (parts.length < 2) {
-      throw new Error(`Path "${path}" must contain at least "db.table"`);
-    }
-    const [db, table, ...rest] = parts;
-    const id = rest.join(".");
-    if (requireId && !id) {
-      throw new Error(`Path "${path}" must include a record id: "db.table.id"`);
-    }
-    return { db, table, id };
-  }
 
   /**
    * Parse the standard `{error, data}` envelope returned by the server.
@@ -241,13 +220,13 @@ class ONQLClient {
   }
 
   /**
-   * Insert a single record.
-   * @param {string} path  Table path, e.g. "mydb.users".
-   * @param {object} data  A single record object.
+   * Insert a single record into `db.table`.
+   * @param {string} db     Database name.
+   * @param {string} table  Target table.
+   * @param {object} data   A single record object.
    * @returns {Promise<any>} Parsed `data` from the server envelope.
    */
-  async insert(path, data) {
-    const { db, table } = this._parsePath(path, false);
+  async insert(db, table, data) {
     if (data === null || typeof data !== "object" || Array.isArray(data)) {
       throw new Error("insert() expects a single record object");
     }
@@ -261,42 +240,50 @@ class ONQLClient {
   }
 
   /**
-   * Update the record at `path`.
-   * @param {string} path  Record path, e.g. "mydb.users.u1".
-   * @param {object} data  Fields to update.
+   * Update records matching `query` (or the explicit `ids`) in `db.table`.
+   *
+   * @param {string} db     Database name.
+   * @param {string} table  Target table.
+   * @param {object} data   Fields to update.
+   * @param {string} query  ONQL query expression (e.g.
+   *                        'mydb.users[id="u1"].id'). Pass `""` if
+   *                        using `opts.ids` instead.
    * @param {object} [opts]
    * @param {string} [opts.protopass="default"]
+   * @param {string[]} [opts.ids=[]]  Explicit record IDs (alternative to query).
    * @returns {Promise<any>}
    */
-  async update(path, data, opts = {}) {
-    const { db, table, id } = this._parsePath(path, true);
+  async update(db, table, data, query, opts = {}) {
     const payload = JSON.stringify({
       db,
       table,
       records: data,
-      query: "",
+      query: query || "",
       protopass: opts.protopass || "default",
-      ids: [id],
+      ids: opts.ids || [],
     });
     const res = await this.sendRequest("update", payload);
     return this._processResult(res.payload);
   }
 
   /**
-   * Delete the record at `path`.
-   * @param {string} path  Record path, e.g. "mydb.users.u1".
+   * Delete records matching `query` (or the explicit `ids`) in `db.table`.
+   *
+   * @param {string} db     Database name.
+   * @param {string} table  Target table.
+   * @param {string} query  ONQL query expression, or `""` if using `opts.ids`.
    * @param {object} [opts]
    * @param {string} [opts.protopass="default"]
+   * @param {string[]} [opts.ids=[]]
    * @returns {Promise<any>}
    */
-  async delete(path, opts = {}) {
-    const { db, table, id } = this._parsePath(path, true);
+  async delete(db, table, query, opts = {}) {
     const payload = JSON.stringify({
       db,
       table,
-      query: "",
+      query: query || "",
       protopass: opts.protopass || "default",
-      ids: [id],
+      ids: opts.ids || [],
     });
     const res = await this.sendRequest("delete", payload);
     return this._processResult(res.payload);
@@ -304,7 +291,7 @@ class ONQLClient {
 
   /**
    * Execute a raw ONQL query.
-   * @param {string} query
+   * @param {string} query  ONQL query expression (e.g. 'mydb.users[active="yes"]').
    * @param {object} [opts]
    * @param {string} [opts.protopass="default"]
    * @param {string} [opts.ctxkey=""]

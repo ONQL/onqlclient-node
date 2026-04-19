@@ -30,16 +30,22 @@ const { ONQLClient } = require('onql-client');
 (async () => {
   const client = await ONQLClient.create({ host: 'localhost', port: 5656 });
 
-  // Insert a record
-  await client.insert('mydb.users', { id: 'u1', name: 'John', age: 30 });
+  // Insert a single record
+  await client.insert('mydb', 'users', { id: 'u1', name: 'John', age: 30 });
 
-  // Query
-  const adults = await client.onql('select * from mydb.users where age > 18');
+  // Read via ONQL expression
+  const adults = await client.onql('mydb.users[age>18]');
   console.log(adults);
 
-  // Update and delete by path
-  await client.update('mydb.users.u1', { age: 31 });
-  await client.delete('mydb.users.u1');
+  // Update using a query
+  await client.update(
+    'mydb', 'users',
+    { age: 31 },
+    client.build('mydb.users[id=$1].id', 'u1')
+  );
+
+  // ...or using explicit ids
+  await client.delete('mydb', 'users', '', { ids: ['u1'] });
 
   await client.close();
 })();
@@ -59,8 +65,7 @@ Creates and returns a connected client instance.
 
 ### `client.sendRequest(keyword, payload, timeout?)`
 
-Sends a raw request frame and waits for the response. Returns an object with
-`request_id`, `source`, and `payload`.
+Sends a raw request frame and waits for the response.
 
 ### `client.close()`
 
@@ -68,74 +73,94 @@ Closes the connection.
 
 ## Direct ORM-style API
 
-On top of raw `sendRequest`, the client exposes convenience methods that build
-the standard payload envelopes for `insert` / `update` / `delete` / `onql` and
-unwrap the server's `{error, data}` response — throwing if the server returned
-a non-empty `error`, returning the decoded `data` otherwise.
+On top of raw `sendRequest`, the client exposes convenience methods for the
+common `insert` / `update` / `delete` / `onql` operations. Each one builds the
+standard payload envelope for you and unwraps the `{error, data}` response —
+throwing on a non-empty `error`, returning the decoded `data` otherwise.
 
-The `path` argument is a **dotted string** identifying what you're operating
-on:
+`db` is passed explicitly to `insert` / `update` / `delete`. `onql` takes a
+fully-qualified ONQL expression (which already includes the db name), so no
+separate db argument is needed.
 
-| Path shape | Meaning |
-|------------|---------|
-| `"mydb.users"` | The `users` table in database `mydb` (used by `insert`) |
-| `"mydb.users.u1"` | The record with id `u1` in `mydb.users` (used by `update` / `delete`) |
+`query` arguments are **ONQL expression strings**, e.g.
+`'mydb.users[id="u1"].id'` or `'mydb.orders[status="pending"]'`. Use
+`client.build(template, ...values)` to substitute `$1, $2, ...` — strings get
+double-quoted, numbers/booleans are inlined verbatim.
 
-### `await client.insert(path, data)`
+### `await client.insert(db, table, data)`
 
 Insert a **single** record.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `path` | `string` | Table path, e.g. `"mydb.users"` |
+| `db` | `string` | Database name |
+| `table` | `string` | Target table |
 | `data` | `object` | A single record object (not an array) |
 
 ```javascript
-await client.insert('mydb.users', { id: 'u1', name: 'John', age: 30 });
+await client.insert('mydb', 'users', { id: 'u1', name: 'John', age: 30 });
 ```
 
-### `await client.update(path, data, opts?)`
+### `await client.update(db, table, data, query, opts?)`
 
-Update the record at `path`.
+Update records matching `query` (or the explicit `opts.ids`).
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `path` | `string` | — | Record path, e.g. `"mydb.users.u1"` |
+| `db` | `string` | — | Database name |
+| `table` | `string` | — | Target table |
 | `data` | `object` | — | Fields to update |
+| `query` | `string` | — | ONQL query expression (e.g. `mydb.users[id="u1"].id`). Pass `""` when using `opts.ids`. |
 | `opts.protopass` | `string` | `"default"` | Proto-pass profile |
+| `opts.ids` | `string[]` | `[]` | Explicit record IDs (alternative to `query`) |
 
 ```javascript
-await client.update('mydb.users.u1', { age: 31 });
-await client.update('mydb.users.u1', { active: false }, { protopass: 'admin' });
+// Via ONQL query
+await client.update(
+  'mydb', 'users',
+  { age: 31 },
+  client.build('mydb.users[id=$1].id', 'u1')
+);
+
+// Via explicit ids
+await client.update('mydb', 'users', { age: 31 }, '', { ids: ['u1'] });
+
+// With custom proto-pass
+await client.update('mydb', 'users', { active: false },
+  client.build('mydb.users[id=$1].id', 'u1'),
+  { protopass: 'admin' });
 ```
 
-### `await client.delete(path, opts?)`
+### `await client.delete(db, table, query, opts?)`
 
-Delete the record at `path`.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `path` | `string` | — | Record path, e.g. `"mydb.users.u1"` |
-| `opts.protopass` | `string` | `"default"` | Proto-pass profile |
+Delete records matching `query` (or the explicit `opts.ids`). Same options
+as `update`.
 
 ```javascript
-await client.delete('mydb.users.u1');
+await client.delete('mydb', 'users',
+  client.build('mydb.users[id=$1].id', 'u1'));
+
+await client.delete('mydb', 'users', '', { ids: ['u1'] });
 ```
 
 ### `await client.onql(query, opts?)`
 
-Run a raw ONQL query. The server's `{error, data}` envelope is unwrapped — the
-returned value is the decoded `data` payload.
+Run a raw ONQL query. The server's `{error, data}` envelope is unwrapped.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `query` | `string` | — | ONQL query text |
+| `query` | `string` | — | ONQL expression (e.g. `mydb.users[active="yes"]`) |
 | `opts.protopass` | `string` | `"default"` | Proto-pass profile |
 | `opts.ctxkey` | `string` | `""` | Context key |
 | `opts.ctxvalues` | `string[]` | `[]` | Context values |
 
 ```javascript
-const rows = await client.onql('select * from mydb.users where age > 18');
+const rows = await client.onql('mydb.users[age>18]');
+
+// With $-placeholder interpolation:
+const byName = await client.onql(
+  client.build('mydb.users[name=$1]', 'John')
+);
 ```
 
 ### `client.build(query, ...values)`
@@ -144,11 +169,8 @@ Replace `$1`, `$2`, … placeholders with values. Strings are automatically
 double-quoted; numbers and booleans are inlined verbatim.
 
 ```javascript
-const q = client.build(
-  'select * from mydb.users where name = $1 and age > $2',
-  'John', 18
-);
-// -> 'select * from mydb.users where name = "John" and age > 18'
+const q = client.build('mydb.users[name=$1 and age>$2]', 'John', 18);
+// -> 'mydb.users[name="John" and age>18]'
 const rows = await client.onql(q);
 ```
 
