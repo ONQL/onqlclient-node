@@ -14,7 +14,6 @@ class ONQLClient {
     this._socket = null;
     this._buffer = Buffer.alloc(0);
     this._pendingRequests = new Map();
-    this._subscriptions = new Map();
     this._defaultTimeout = (options.defaultTimeout != null ? options.defaultTimeout : 10);
     this._connected = false;
   }
@@ -83,14 +82,6 @@ class ONQLClient {
 
       const [responseRid, sourceId, responsePayload] = parts;
 
-      // Check subscriptions first
-      const cb = this._subscriptions.get(responseRid);
-      if (cb) {
-        this._dispatchSubscription(responseRid, sourceId, responsePayload);
-        continue;
-      }
-
-      // Check pending requests
       const pending = this._pendingRequests.get(responseRid);
       if (pending) {
         pending.resolve({
@@ -107,7 +98,7 @@ class ONQLClient {
    */
   _onClose() {
     this._connected = false;
-    for (const [rid, pending] of this._pendingRequests) {
+    for (const [, pending] of this._pendingRequests) {
       pending.reject(new Error("Connection lost."));
     }
     this._pendingRequests.clear();
@@ -200,97 +191,34 @@ class ONQLClient {
     });
   }
 
-  /**
-   * Subscribe to streaming responses.
-   * @param {string} onquery - The onquery identifier.
-   * @param {string} query - The query string.
-   * @param {function(string, string, string): void} callback - Called with (rid, source, payload).
-   * @returns {Promise<string>} The subscription request ID.
-   */
-  subscribe(onquery, query, callback) {
-    if (!this._socket || !this._connected) {
-      return Promise.reject(new Error("Client is not connected."));
-    }
-
-    const rid = this._generateRequestId();
-    this._subscriptions.set(rid, callback);
-
-    const payload = JSON.stringify({ onquery, query });
-    const frame = Buffer.concat([
-      Buffer.from(`${rid}${DELIMITER}subscribe${DELIMITER}${payload}`, "utf-8"),
-      EOM,
-    ]);
-
-    return new Promise((resolve, reject) => {
-      this._socket.write(frame, (err) => {
-        if (err) {
-          this._subscriptions.delete(rid);
-          reject(err);
-          return;
-        }
-        resolve(rid);
-      });
-    });
-  }
-
-  /**
-   * Unsubscribe from a previous subscription.
-   * @param {string} rid - The subscription request ID to cancel.
-   * @returns {Promise<void>}
-   */
-  unsubscribe(rid) {
-    this._subscriptions.delete(rid);
-
-    if (!this._socket || !this._connected) {
-      return Promise.resolve();
-    }
-
-    const payload = JSON.stringify({ rid });
-    const frame = Buffer.concat([
-      Buffer.from(`${rid}${DELIMITER}unsubscribe${DELIMITER}${payload}`, "utf-8"),
-      EOM,
-    ]);
-
-    return new Promise((resolve) => {
-      this._socket.write(frame, () => {
-        resolve();
-      });
-    });
-  }
-
-  /**
-   * Dispatch a subscription callback. If the callback returns a promise,
-   * it is left to settle on its own (fire-and-forget), matching the Python
-   * driver's asyncio.create_task behavior.
-   * @param {string} rid
-   * @param {string} keyword
-   * @param {string} payload
-   */
-  _dispatchSubscription(rid, keyword, payload) {
-    const cb = this._subscriptions.get(rid);
-    if (!cb) {
-      return;
-    }
-    try {
-      cb(rid, keyword, payload);
-    } catch (_) {
-      // Silently ignore callback errors, matching Python driver behavior.
-    }
-  }
-
   // ------------------------------------------------------------------
   // Direct ORM-style API (insert / update / delete / onql / build)
+  //
+  // `path` is a dotted string identifying a record or a table, e.g.
+  //   "mydb.users"         -> whole `users` table in database `mydb`
+  //   "mydb.users.u1"      -> record with id `u1` in `mydb.users`
   // ------------------------------------------------------------------
 
   /**
-   * Set the default database name used by insert / update / delete / onql.
-   * Returns `this` so calls can be chained.
-   * @param {string} db
-   * @returns {ONQLClient}
+   * Parse a "db.table" or "db.table.id" path into parts.
+   * @param {string} path
+   * @param {boolean} requireId  If true, path must contain an id segment.
+   * @returns {{db: string, table: string, id: string}}
    */
-  setup(db) {
-    this._db = db;
-    return this;
+  _parsePath(path, requireId = false) {
+    if (typeof path !== "string" || path.length === 0) {
+      throw new Error('Path must be a non-empty string like "db.table" or "db.table.id"');
+    }
+    const parts = path.split(".");
+    if (parts.length < 2) {
+      throw new Error(`Path "${path}" must contain at least "db.table"`);
+    }
+    const [db, table, ...rest] = parts;
+    const id = rest.join(".");
+    if (requireId && !id) {
+      throw new Error(`Path "${path}" must include a record id: "db.table.id"`);
+    }
+    return { db, table, id };
   }
 
   /**
@@ -313,15 +241,19 @@ class ONQLClient {
   }
 
   /**
-   * Insert one or more records into a table.
-   * @param {string} table
-   * @param {object|object[]} data - Record or array of records.
+   * Insert a single record.
+   * @param {string} path  Table path, e.g. "mydb.users".
+   * @param {object} data  A single record object.
    * @returns {Promise<any>} Parsed `data` from the server envelope.
    */
-  async insert(table, data) {
+  async insert(path, data) {
+    const { db, table } = this._parsePath(path, false);
+    if (data === null || typeof data !== "object" || Array.isArray(data)) {
+      throw new Error("insert() expects a single record object");
+    }
     const payload = JSON.stringify({
-      db: this._db,
-      table: table,
+      db,
+      table,
       records: data,
     });
     const res = await this.sendRequest("insert", payload);
@@ -329,44 +261,42 @@ class ONQLClient {
   }
 
   /**
-   * Update records matching `query`.
-   * @param {string} table
-   * @param {object} data - Fields to update.
-   * @param {object|string} query - Match query.
+   * Update the record at `path`.
+   * @param {string} path  Record path, e.g. "mydb.users.u1".
+   * @param {object} data  Fields to update.
    * @param {object} [opts]
    * @param {string} [opts.protopass="default"]
-   * @param {string[]} [opts.ids=[]]
    * @returns {Promise<any>}
    */
-  async update(table, data, query, opts = {}) {
+  async update(path, data, opts = {}) {
+    const { db, table, id } = this._parsePath(path, true);
     const payload = JSON.stringify({
-      db: this._db,
-      table: table,
+      db,
+      table,
       records: data,
-      query: query,
+      query: "",
       protopass: opts.protopass || "default",
-      ids: opts.ids || [],
+      ids: [id],
     });
     const res = await this.sendRequest("update", payload);
     return this._processResult(res.payload);
   }
 
   /**
-   * Delete records matching `query`.
-   * @param {string} table
-   * @param {object|string} query
+   * Delete the record at `path`.
+   * @param {string} path  Record path, e.g. "mydb.users.u1".
    * @param {object} [opts]
    * @param {string} [opts.protopass="default"]
-   * @param {string[]} [opts.ids=[]]
    * @returns {Promise<any>}
    */
-  async delete(table, query, opts = {}) {
+  async delete(path, opts = {}) {
+    const { db, table, id } = this._parsePath(path, true);
     const payload = JSON.stringify({
-      db: this._db,
-      table: table,
-      query: query,
+      db,
+      table,
+      query: "",
       protopass: opts.protopass || "default",
-      ids: opts.ids || [],
+      ids: [id],
     });
     const res = await this.sendRequest("delete", payload);
     return this._processResult(res.payload);
