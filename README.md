@@ -4,8 +4,22 @@ Official Node.js client for the ONQL database server.
 
 ## Installation
 
+### From npm
+
 ```bash
 npm install onql-client
+```
+
+### From GitHub (latest `main`)
+
+```bash
+npm install github:ONQL/onqlclient-node
+```
+
+### Pinned to a release tag
+
+```bash
+npm install "github:ONQL/onqlclient-node#v1.0.0"
 ```
 
 ## Quick Start
