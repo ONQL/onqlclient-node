@@ -1,0 +1,27 @@
+{
+  "name": "onql-client",
+  "version": "1.0.0",
+  "description": "ONQL client driver for Node.js",
+  "main": "index.js",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ONQL/onqlclient-node.git"
+  },
+  "homepage": "https://onql.org",
+  "bugs": {
+    "url": "https://github.com/ONQL/onqlclient-node/issues"
+  },
+  "files": [
+    "index.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "keywords": [
+    "onql",
+    "client",
+    "driver"
+  ]
+}
